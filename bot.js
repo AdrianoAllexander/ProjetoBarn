@@ -8,7 +8,6 @@ const express = require("express");
 const { GoogleSpreadsheet } = require("google-spreadsheet");
 const { JWT } = require("google-auth-library");
 
-const SHEET_ID = "1eLCTyFC1oXyCaiKpP-I_NGXShBAyGGi5xwRZ1O0dj7Q";
 const CREDENTIALS_PATH = "./credentials.json";
 
 let dadosCache = null;
@@ -17,13 +16,14 @@ const conversas = {};
 async function carregarDadosDoSheets() {
   try {
     const creds = require(CREDENTIALS_PATH);
+
     const serviceAccountAuth = new JWT({
       email: creds.client_email,
       key: creds.private_key.replace(/\\n/g, "\n"),
       scopes: ["https://www.googleapis.com/auth/spreadsheets"],
     });
 
-    const doc = new GoogleSpreadsheet(SHEET_ID, serviceAccountAuth);
+    const doc = new GoogleSpreadsheet(creds.sheetId, serviceAccountAuth);
     await doc.loadInfo();
 
     const sheetFuncionarios = doc.sheetsByTitle["Funcionarios"];

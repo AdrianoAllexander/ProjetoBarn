@@ -1,0 +1,16 @@
+credentials.json
+
+# Ignorar pastas temporárias
+node_modules/
+dist/
+.env
+
+# Ignorar logs
+*.log
+
+# Ignorar sistema do VSCode
+.vscode/
+
+# Ignorar arquivos do sistema
+.DS_Store
+Thumbs.db

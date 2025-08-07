@@ -4,6 +4,7 @@ credentials.json
 node_modules/
 dist/
 .env
+auth_info_baileys/
 
 # Ignorar logs
 *.log

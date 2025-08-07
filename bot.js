@@ -13,6 +13,9 @@ const CREDENTIALS_PATH = "./credentials.json";
 let dadosCache = null;
 const conversas = {};
 
+// Mutex para prevenir concorrência nas operações de saldo
+const operacoesEmAndamento = new Set();
+
 async function carregarDadosDoSheets() {
   try {
     const creds = require(CREDENTIALS_PATH);
@@ -64,8 +67,10 @@ async function carregarDadosDoSheets() {
       }
     }
 
+    console.log(`Dados carregados: ${Object.keys(funcionarios).length} funcionários, ${Object.keys(recompensas).length} recompensas`);
     return { funcionarios, recompensas, doc };
   } catch (error) {
+    console.error("Erro ao carregar dados do Google Sheets:", error.message);
     throw error;
   }
 }
@@ -83,21 +88,26 @@ async function atualizarSaldoNoSheets(cpfFuncionario, novoSaldo) {
         row.set("Saldo", novoSaldo);
         await row.save();
         dadosCache.funcionarios[cpfFuncionario].saldo = novoSaldo;
+        console.log(`Saldo atualizado para CPF ${cpfFuncionario}: ${novoSaldo}`);
         return;
       }
     }
 
     throw new Error(`Funcionário com CPF ${cpfFuncionario} não encontrado`);
   } catch (error) {
+    console.error("Erro ao atualizar saldo:", error.message);
     throw error;
   }
 }
 
 async function salvarResgate(cpfFuncionario, recompensa, numeroPedido) {
   try {
-    if (!dadosCache.doc) return;
+    if (!dadosCache.doc) {
+      throw new Error("Documento do Google Sheets não disponível");
+    }
+    
+    // Obter ou criar aba Historico
     let sheetHistorico = dadosCache.doc.sheetsByTitle["Historico"];
-
     if (!sheetHistorico) {
       sheetHistorico = await dadosCache.doc.addSheet({
         title: "Historico",
@@ -114,10 +124,30 @@ async function salvarResgate(cpfFuncionario, recompensa, numeroPedido) {
       });
     }
 
+    // Obter ou criar aba Lançamentos
+    let sheetLancamentos = dadosCache.doc.sheetsByTitle["Lançamentos"];
+    if (!sheetLancamentos) {
+      sheetLancamentos = await dadosCache.doc.addSheet({
+        title: "Lançamentos",
+        headerValues: [
+          "Data",
+          "Hora",
+          "CPF",
+          "Nome",
+          "Tipo",
+          "Recompensa",
+          "Valor",
+          "Pedido",
+          "Saldo_Anterior",
+          "Saldo_Atual",
+        ],
+      });
+    }
+
     const agora = new Date();
     const funcionario = dadosCache.funcionarios[cpfFuncionario];
 
-    await sheetHistorico.addRow({
+    const registroHistorico = {
       Data: agora.toLocaleString("pt-BR"),
       CPF: cpfFuncionario,
       Nome: funcionario.nome,
@@ -126,16 +156,40 @@ async function salvarResgate(cpfFuncionario, recompensa, numeroPedido) {
       Pedido: numeroPedido,
       Saldo_Anterior: funcionario.saldo + recompensa.valor,
       Saldo_Atual: funcionario.saldo,
-    });
-  } catch (error) {}
+    };
+
+    const registroLancamento = {
+      Data: agora.toLocaleDateString("pt-BR"),
+      Hora: agora.toLocaleTimeString("pt-BR"),
+      CPF: cpfFuncionario,
+      Nome: funcionario.nome,
+      Tipo: "RESGATE",
+      Recompensa: recompensa.nome,
+      Valor: recompensa.valor,
+      Pedido: numeroPedido,
+      Saldo_Anterior: funcionario.saldo + recompensa.valor,
+      Saldo_Atual: funcionario.saldo,
+    };
+
+    // Salvar em ambas as abas
+    await Promise.all([
+      sheetHistorico.addRow(registroHistorico),
+      sheetLancamentos.addRow(registroLancamento)
+    ]);
+
+  } catch (error) {
+    console.error("Erro ao salvar resgate:", error.message);
+    throw error;
+  }
 }
 
 async function processarMensagem(numeroWhatsApp, mensagem) {
   if (!dadosCache) {
     try {
       dadosCache = await carregarDadosDoSheets();
-    } catch {
-      return "❌ Erro ao carregar dados do sistema.";
+    } catch (error) {
+      console.error("Erro ao carregar dados do sistema:", error.message);
+      return "❌ Erro ao carregar dados do sistema. Tente novamente em alguns momentos.";
     }
   }
 
@@ -151,7 +205,9 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
 
   if (etapaAtual === "pedindo_cpf") {
     const cpf = mensagem.trim().replace(/\D/g, "");
-    if (!funcionarios[cpf]) return `❌ CPF não encontrado.`;
+    if (!funcionarios[cpf]) {
+      return `❌ CPF não encontrado. Verifique se digitou corretamente.`;
+    }
 
     conversas[numeroWhatsApp].cpf = cpf;
     conversas[numeroWhatsApp].etapa = "mostrando_pontos";
@@ -175,7 +231,7 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
 
     if (!temRecompensa) {
       delete conversas[numeroWhatsApp];
-      return resposta + "\n⚠️ Saldo insuficiente.";
+      return resposta + "\n⚠️ Saldo insuficiente para qualquer recompensa.";
     }
 
     return resposta + "\n📝 Digite o número da recompensa ou *0* para sair.";
@@ -204,8 +260,22 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
       return `❌ Saldo insuficiente para ${recompensaEscolhida.nome}.`;
     }
 
+    // Verificar se já existe uma operação em andamento para este CPF
+    if (operacoesEmAndamento.has(cpf)) {
+      return "⏳ Aguarde, já existe uma operação em andamento para este CPF.";
+    }
+
     try {
-      const novoSaldo = funcionario.saldo - recompensaEscolhida.valor;
+      // Bloquear operações concorrentes para este CPF
+      operacoesEmAndamento.add(cpf);
+
+      // Verificar saldo novamente após obter o lock (double-check)
+      const funcionarioAtualizado = dadosCache.funcionarios[cpf];
+      if (funcionarioAtualizado.saldo < recompensaEscolhida.valor) {
+        return `❌ Saldo insuficiente para ${recompensaEscolhida.nome}.`;
+      }
+
+      const novoSaldo = funcionarioAtualizado.saldo - recompensaEscolhida.valor;
       await atualizarSaldoNoSheets(cpf, novoSaldo);
 
       const agora = new Date();
@@ -219,7 +289,7 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
 
       await salvarResgate(cpf, recompensaEscolhida, numeroPedido);
       const nota = gerarNotaPedido(
-        funcionario.nome,
+        funcionarioAtualizado.nome,
         cpf,
         recompensaEscolhida,
         numeroPedido,
@@ -227,8 +297,12 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
       );
       delete conversas[numeroWhatsApp];
       return nota;
-    } catch {
-      return "❌ Erro ao processar resgate.";
+    } catch (error) {
+      console.error("Erro ao processar resgate:", error.message);
+      return "❌ Erro ao processar resgate. Tente novamente.";
+    } finally {
+      // Sempre liberar o lock, mesmo em caso de erro
+      operacoesEmAndamento.delete(cpf);
     }
   }
 }
@@ -256,21 +330,34 @@ function gerarNotaPedido(nome, cpf, recompensa, numeroPedido, saldoRestante) {
 }
 
 async function conectarWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
-  const sock = makeWASocket({ auth: state });
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
+    const sock = makeWASocket({ auth: state });
 
-  sock.ev.on("connection.update", (update) => {
-    const { connection, lastDisconnect, qr } = update;
-    if (qr) qrcode.generate(qr, { small: true });
-    if (connection === "close") {
-      const shouldReconnect =
-        lastDisconnect?.error?.output?.statusCode !==
-        DisconnectReason.loggedOut;
-      if (shouldReconnect) setTimeout(() => conectarWhatsApp(), 5000);
-    }
-  });
+    sock.ev.on("connection.update", (update) => {
+      const { connection, lastDisconnect, qr } = update;
+      
+      if (qr) {
+        console.log("QR Code gerado:");
+        qrcode.generate(qr, { small: true });
+      }
+      
+      if (connection === "close") {
+        const shouldReconnect =
+          lastDisconnect?.error?.output?.statusCode !==
+          DisconnectReason.loggedOut;
+        
+        console.log("Conexão fechada, tentando reconectar:", shouldReconnect);
+        
+        if (shouldReconnect) {
+          setTimeout(() => conectarWhatsApp(), 5000);
+        }
+      } else if (connection === "open") {
+        console.log("WhatsApp conectado com sucesso!");
+      }
+    });
 
-  sock.ev.on("creds.update", saveCreds);
+    sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("messages.upsert", async (m) => {
     const msg = m.messages[0];
@@ -290,14 +377,19 @@ async function conectarWhatsApp() {
             textoMensagem
           );
           await sock.sendMessage(numeroRemetente, { text: respostaBot });
-        } catch {
+        } catch (error) {
+          console.error("Erro ao processar mensagem:", error.message);
           await sock.sendMessage(numeroRemetente, {
-            text: "❌ Erro. Tente novamente.",
+            text: "❌ Erro interno do sistema. Tente novamente em alguns momentos.",
           });
         }
       }
     }
   });
+  } catch (error) {
+    console.error("Erro ao conectar WhatsApp:", error.message);
+    setTimeout(() => conectarWhatsApp(), 10000);
+  }
 }
 
 const app = express();
@@ -322,16 +414,35 @@ app.get("/reload", async (req, res) => {
 });
 
 carregarDadosDoSheets()
-  .then(() => conectarWhatsApp())
-  .catch(() => process.exit(1));
+  .then(() => {
+    console.log("Sistema iniciado com sucesso!");
+    conectarWhatsApp();
+  })
+  .catch((error) => {
+    console.error("Erro ao iniciar sistema:", error.message);
+    process.exit(1);
+  });
 
-app.listen(PORT, () => {});
-process.on("uncaughtException", () =>
-  setTimeout(() => conectarWhatsApp(), 10000)
-);
-process.on("unhandledRejection", () =>
-  setTimeout(() => conectarWhatsApp(), 10000)
-);
+app.listen(PORT, () => {
+  console.log(`Servidor Express rodando na porta ${PORT}`);
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("Exceção não capturada:", error.message);
+  setTimeout(() => conectarWhatsApp(), 10000);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Promise rejeitada não tratada:", reason);
+  setTimeout(() => conectarWhatsApp(), 10000);
+});
+
 setInterval(async () => {
-  dadosCache = await carregarDadosDoSheets();
+  try {
+    console.log("Recarregando dados do Google Sheets...");
+    dadosCache = await carregarDadosDoSheets();
+    console.log("Dados recarregados com sucesso!");
+  } catch (error) {
+    console.error("Erro ao recarregar dados:", error.message);
+  }
 }, 5 * 60 * 1000);

@@ -7,15 +7,21 @@ const qrcode = require("qrcode-terminal");
 const express = require("express");
 const { GoogleSpreadsheet } = require("google-spreadsheet");
 const { JWT } = require("google-auth-library");
+const {
+  inteiroSeguro,
+  numeroSeguroBR,
+  sanitizarCPF,
+  sanitizarNome,
+} = require("./utils/limpeza");
 
-const CREDENTIALS_PATH = "./credentials.json";
+const CAMINHO_CREDENCIAIS = "./credentials.json";
 
 let dadosCache = null;
 const conversas = {};
 
 async function carregarDadosDoSheets() {
   try {
-    const creds = require(CREDENTIALS_PATH);
+    const creds = require(CAMINHO_CREDENCIAIS);
 
     const serviceAccountAuth = new JWT({
       email: creds.client_email,
@@ -26,30 +32,64 @@ async function carregarDadosDoSheets() {
     const doc = new GoogleSpreadsheet(creds.sheetId, serviceAccountAuth);
     await doc.loadInfo();
 
-    const sheetFuncionarios = doc.sheetsByTitle["Funcionarios"];
-    if (!sheetFuncionarios)
-      throw new Error('Aba "Funcionarios" não encontrada');
+    let sheetFuncionarios = doc.sheetsByTitle["Funcionarios"];
+    if (!sheetFuncionarios) {
+      sheetFuncionarios = await doc.addSheet({
+        title: "Funcionarios",
+        headerValues: [
+          "ID",
+          "CPF",
+          "Nome",
+          "NOME",
+          "Pontos Totais",
+          "PONTOS_TOTAIS",
+          "Saldo",
+          "SALDO",
+        ],
+      });
+    }
+
+    let sheetRecompensas = doc.sheetsByTitle["Recompensas"];
+    if (!sheetRecompensas) {
+      sheetRecompensas = await doc.addSheet({
+        title: "Recompensas",
+        headerValues: ["ID", "Nome", "NOME", "Valor", "VALOR"],
+      });
+    }
+
+    let sheetHistorico = doc.sheetsByTitle["Historico"];
+    if (!sheetHistorico) {
+      sheetHistorico = await doc.addSheet({
+        title: "Historico",
+        headerValues: [
+          "Data",
+          "CPF",
+          "Nome",
+          "Recompensa",
+          "Valor",
+          "Pedido",
+          "Saldo_Anterior",
+          "Saldo_Atual",
+        ],
+      });
+    }
 
     const rowsFunc = await sheetFuncionarios.getRows();
     const funcionarios = {};
 
     for (const row of rowsFunc) {
-      const cpf = row.get("ID") || row.get("CPF");
+      const cpf = sanitizarCPF(row.get("ID") || row.get("CPF"));
       if (cpf) {
         funcionarios[cpf] = {
-          nome: row.get("Nome") || row.get("NOME") || "",
-          pontosTotais: parseInt(
-            row.get("Pontos Totais") || row.get("PONTOS_TOTAIS") || "0",
-            10
+          nome: sanitizarNome(row.get("Nome") || row.get("NOME") || ""),
+          pontosTotais: inteiroSeguro(
+            row.get("Pontos Totais") || row.get("PONTOS_TOTAIS") || "0"
           ),
-          saldo: parseInt(row.get("Saldo") || row.get("SALDO") || "0", 10),
+          saldo: inteiroSeguro(row.get("Saldo") || row.get("SALDO") || "0"),
           rowIndex: row.rowNumber,
         };
       }
     }
-
-    const sheetRecompensas = doc.sheetsByTitle["Recompensas"];
-    if (!sheetRecompensas) throw new Error('Aba "Recompensas" não encontrada');
 
     const rowsRec = await sheetRecompensas.getRows();
     const recompensas = {};
@@ -58,46 +98,46 @@ async function carregarDadosDoSheets() {
       const id = row.get("ID");
       if (id) {
         recompensas[id] = {
-          nome: row.get("Nome") || row.get("NOME") || "",
-          valor: parseInt(row.get("Valor") || row.get("VALOR") || "0", 10),
+          nome: sanitizarNome(row.get("Nome") || row.get("NOME") || ""),
+          valor: inteiroSeguro(row.get("Valor") || row.get("VALOR") || "0"),
         };
       }
     }
 
     return { funcionarios, recompensas, doc };
   } catch (error) {
+    console.error("Erro ao carregar dados do Sheets:", error);
     throw error;
   }
 }
 
-async function atualizarSaldoNoSheets(cpfFuncionario, novoSaldo) {
-  try {
-    if (!dadosCache.doc)
-      throw new Error("Documento do Google Sheets não disponível");
-    const sheetFuncionarios = dadosCache.doc.sheetsByTitle["Funcionarios"];
-    const rows = await sheetFuncionarios.getRows();
+async function buscarFuncionarioDoSheets(cpfFuncionario) {
+  if (!dadosCache || !dadosCache.doc)
+    throw new Error("Documento do Google Sheets não disponível");
+  const sheetFuncionarios = dadosCache.doc.sheetsByTitle["Funcionarios"];
+  const rows = await sheetFuncionarios.getRows();
 
-    for (const row of rows) {
-      const cpf = row.get("ID") || row.get("CPF");
-      if (cpf === cpfFuncionario) {
-        row.set("Saldo", novoSaldo);
-        await row.save();
-        dadosCache.funcionarios[cpfFuncionario].saldo = novoSaldo;
-        return;
-      }
+  for (const row of rows) {
+    const cpf = sanitizarCPF(row.get("ID") || row.get("CPF"));
+    if (cpf === cpfFuncionario) {
+      return {
+        nome: sanitizarNome(row.get("Nome") || row.get("NOME") || ""),
+        pontosTotais: inteiroSeguro(
+          row.get("Pontos Totais") || row.get("PONTOS_TOTAIS") || "0"
+        ),
+        saldo: inteiroSeguro(row.get("Saldo") || row.get("SALDO") || "0"),
+        rowIndex: row.rowNumber,
+        rowObj: row,
+      };
     }
-
-    throw new Error(`Funcionário com CPF ${cpfFuncionario} não encontrado`);
-  } catch (error) {
-    throw error;
   }
+  return null;
 }
 
 async function salvarResgate(cpfFuncionario, recompensa, numeroPedido) {
   try {
     if (!dadosCache.doc) return;
     let sheetHistorico = dadosCache.doc.sheetsByTitle["Historico"];
-
     if (!sheetHistorico) {
       sheetHistorico = await dadosCache.doc.addSheet({
         title: "Historico",
@@ -115,19 +155,21 @@ async function salvarResgate(cpfFuncionario, recompensa, numeroPedido) {
     }
 
     const agora = new Date();
-    const funcionario = dadosCache.funcionarios[cpfFuncionario];
+    const funcionario = await buscarFuncionarioDoSheets(cpfFuncionario);
 
     await sheetHistorico.addRow({
       Data: agora.toLocaleString("pt-BR"),
       CPF: cpfFuncionario,
-      Nome: funcionario.nome,
-      Recompensa: recompensa.nome,
+      Nome: sanitizarNome(funcionario.nome),
+      Recompensa: sanitizarNome(recompensa.nome),
       Valor: recompensa.valor,
       Pedido: numeroPedido,
       Saldo_Anterior: funcionario.saldo + recompensa.valor,
       Saldo_Atual: funcionario.saldo,
     });
-  } catch (error) {}
+  } catch (error) {
+    console.error("Erro ao salvar resgate:", error);
+  }
 }
 
 async function processarMensagem(numeroWhatsApp, mensagem) {
@@ -150,14 +192,14 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
   const etapaAtual = conversas[numeroWhatsApp].etapa;
 
   if (etapaAtual === "pedindo_cpf") {
-    const cpf = mensagem.trim().replace(/\D/g, "");
+    const cpf = sanitizarCPF(mensagem.trim());
     if (!funcionarios[cpf]) return `❌ CPF não encontrado.`;
 
     conversas[numeroWhatsApp].cpf = cpf;
     conversas[numeroWhatsApp].etapa = "mostrando_pontos";
 
     const funcionario = funcionarios[cpf];
-    const nome = funcionario.nome;
+    const nome = sanitizarNome(funcionario.nome);
     const pontosTotais = funcionario.pontosTotais;
     const saldo = funcionario.saldo;
 
@@ -165,11 +207,12 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
 
     let temRecompensa = false;
     for (const [codigo, recompensa] of Object.entries(recompensas)) {
+      const nomeRec = sanitizarNome(recompensa.nome);
       if (saldo >= recompensa.valor) {
-        resposta += `${codigo} - ${recompensa.nome} (${recompensa.valor}) ✅\n`;
+        resposta += `${codigo} - ${nomeRec} (${recompensa.valor}) ✅\n`;
         temRecompensa = true;
       } else {
-        resposta += `${codigo} - ${recompensa.nome} (${recompensa.valor}) ❌\n`;
+        resposta += `${codigo} - ${nomeRec} (${recompensa.valor}) ❌\n`;
       }
     }
 
@@ -197,16 +240,29 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
     }
 
     const cpf = conversas[numeroWhatsApp].cpf;
-    const funcionario = funcionarios[cpf];
     const recompensaEscolhida = recompensas[escolha];
 
-    if (funcionario.saldo < recompensaEscolhida.valor) {
-      return `❌ Saldo insuficiente para ${recompensaEscolhida.nome}.`;
-    }
-
     try {
-      const novoSaldo = funcionario.saldo - recompensaEscolhida.valor;
-      await atualizarSaldoNoSheets(cpf, novoSaldo);
+      const funcionarioAtual = await buscarFuncionarioDoSheets(cpf);
+      if (!funcionarioAtual) {
+        return "❌ Funcionário não encontrado.";
+      }
+      if (funcionarioAtual.saldo < recompensaEscolhida.valor) {
+        return `❌ Saldo insuficiente para ${sanitizarNome(
+          recompensaEscolhida.nome
+        )}.`;
+      }
+
+      const novoSaldo = funcionarioAtual.saldo - recompensaEscolhida.valor;
+      try {
+        funcionarioAtual.rowObj.set("Saldo", novoSaldo);
+        await funcionarioAtual.rowObj.save();
+      } catch (erroSaldo) {
+        console.error("Erro ao atualizar saldo no Sheets:", erroSaldo);
+        return "❌ Erro ao atualizar o saldo, tente novamente.";
+      }
+
+      dadosCache.funcionarios[cpf].saldo = novoSaldo;
 
       const agora = new Date();
       const numeroPedido = `PED${agora.getFullYear()}${String(
@@ -219,7 +275,7 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
 
       await salvarResgate(cpf, recompensaEscolhida, numeroPedido);
       const nota = gerarNotaPedido(
-        funcionario.nome,
+        sanitizarNome(funcionarioAtual.nome),
         cpf,
         recompensaEscolhida,
         numeroPedido,
@@ -227,7 +283,8 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
       );
       delete conversas[numeroWhatsApp];
       return nota;
-    } catch {
+    } catch (err) {
+      console.error("Erro ao processar resgate:", err);
       return "❌ Erro ao processar resgate.";
     }
   }
@@ -238,21 +295,21 @@ function gerarNotaPedido(nome, cpf, recompensa, numeroPedido, saldoRestante) {
   const dataHora = agora.toLocaleString("pt-BR");
 
   return `
-  📋 NOTA DE RESGATE
-  
-  🆔 Pedido: ${numeroPedido}
-  📅 Data: ${dataHora}
-  
-  👤 Funcionário: ${nome}
-  🆔 CPF: ${cpf}
-  
-  🎁 Recompensa: ${recompensa.nome}
-  🎯 Pontos utilizados: ${recompensa.valor}
-  💰 Saldo restante: ${saldoRestante}
-  
-  ✅ Resgate aprovado!
-  🏢 Procure o RH para retirar.
-  `.trim();
+              📋 NOTA DE RESGATE
+              
+              🆔 Pedido: ${numeroPedido}
+              📅 Data: ${dataHora}
+              
+              👤 Funcionário: ${sanitizarNome(nome)}
+              🆔 CPF: ${cpf}
+              
+              🎁 Recompensa: ${sanitizarNome(recompensa.nome)}
+              🎯 Pontos utilizados: ${recompensa.valor}
+              💰 Saldo restante: ${saldoRestante}
+              
+              ✅ Resgate aprovado!
+              🏢 Procure o RH para retirar.
+              `.trim();
 }
 
 async function conectarWhatsApp() {
@@ -290,7 +347,8 @@ async function conectarWhatsApp() {
             textoMensagem
           );
           await sock.sendMessage(numeroRemetente, { text: respostaBot });
-        } catch {
+        } catch (err) {
+          console.error("Erro no WhatsApp:", err);
           await sock.sendMessage(numeroRemetente, {
             text: "❌ Erro. Tente novamente.",
           });
@@ -323,15 +381,42 @@ app.get("/reload", async (req, res) => {
 
 carregarDadosDoSheets()
   .then(() => conectarWhatsApp())
-  .catch(() => process.exit(1));
+  .catch((err) => {
+    console.error("Erro de inicialização:", err);
+    process.exit(1);
+  });
 
 app.listen(PORT, () => {});
-process.on("uncaughtException", () =>
-  setTimeout(() => conectarWhatsApp(), 10000)
-);
-process.on("unhandledRejection", () =>
-  setTimeout(() => conectarWhatsApp(), 10000)
-);
+process.on("uncaughtException", (err) => {
+  console.error("uncaughtException:", err);
+  setTimeout(() => conectarWhatsApp(), 10000);
+});
+process.on("unhandledRejection", (err) => {
+  console.error("unhandledRejection:", err);
+  setTimeout(() => conectarWhatsApp(), 10000);
+});
 setInterval(async () => {
-  dadosCache = await carregarDadosDoSheets();
+  try {
+    dadosCache = await carregarDadosDoSheets();
+  } catch (err) {
+    console.error("Erro no reload automático:", err);
+  }
 }, 5 * 60 * 1000);
+
+const fs = require("fs");
+const path = require("path");
+
+function removerPastaAuthInfo() {
+  const pasta = path.join(__dirname, "auth_info_baileys");
+  if (fs.existsSync(pasta)) {
+    fs.rmSync(pasta, { recursive: true, force: true });
+    console.log("Pasta auth_info_baileys removida.");
+  }
+}
+process.on("exit", removerPastaAuthInfo);
+["SIGINT", "SIGTERM", "SIGQUIT"].forEach((sig) => {
+  process.on(sig, () => {
+    removerPastaAuthInfo();
+    process.exit();
+  });
+});

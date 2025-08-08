@@ -1,3 +1,6 @@
+const fs = require("fs");
+const path = require("path");
+
 const {
   default: makeWASocket,
   DisconnectReason,
@@ -14,14 +17,13 @@ const {
   sanitizarNome,
 } = require("./utils/limpeza");
 
-const CAMINHO_CREDENCIAIS = "./credentials.json";
-
+const pastaAuth = path.join("/data", "auth_info_baileys");
 let dadosCache = null;
 const conversas = {};
 
 async function carregarDadosDoSheets() {
   try {
-    const creds = require(CAMINHO_CREDENCIAIS);
+    const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
 
     const serviceAccountAuth = new JWT({
       email: creds.client_email,
@@ -313,7 +315,7 @@ function gerarNotaPedido(nome, cpf, recompensa, numeroPedido, saldoRestante) {
 }
 
 async function conectarWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
+  const { state, saveCreds } = await useMultiFileAuthState(pastaAuth);
   const sock = makeWASocket({ auth: state });
 
   sock.ev.on("connection.update", (update) => {
@@ -360,7 +362,10 @@ async function conectarWhatsApp() {
 
 const app = express();
 app.use(express.json());
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Servidor rodando na porta ${PORT}`);
+});
 
 app.get("/", (req, res) => {
   res.json({
@@ -386,14 +391,13 @@ carregarDadosDoSheets()
     process.exit(1);
   });
 
-app.listen(PORT, () => {});
 process.on("uncaughtException", (err) => {
   console.error("uncaughtException:", err);
-  setTimeout(() => conectarWhatsApp(), 10000);
+  process.exit(1);
 });
 process.on("unhandledRejection", (err) => {
   console.error("unhandledRejection:", err);
-  setTimeout(() => conectarWhatsApp(), 10000);
+  process.exit(1);
 });
 setInterval(async () => {
   try {
@@ -402,21 +406,3 @@ setInterval(async () => {
     console.error("Erro no reload automático:", err);
   }
 }, 5 * 60 * 1000);
-
-const fs = require("fs");
-const path = require("path");
-
-function removerPastaAuthInfo() {
-  const pasta = path.join(__dirname, "auth_info_baileys");
-  if (fs.existsSync(pasta)) {
-    fs.rmSync(pasta, { recursive: true, force: true });
-    console.log("Pasta auth_info_baileys removida.");
-  }
-}
-process.on("exit", removerPastaAuthInfo);
-["SIGINT", "SIGTERM", "SIGQUIT"].forEach((sig) => {
-  process.on(sig, () => {
-    removerPastaAuthInfo();
-    process.exit();
-  });
-});

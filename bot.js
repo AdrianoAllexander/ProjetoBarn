@@ -15,12 +15,42 @@ const {
   numeroSeguroBR,
   sanitizarCPF,
   sanitizarNome,
+  grupoValido,
+  tratarGrupo,
+  GRUPO_ORDEM,
 } = require("./utils/limpeza");
 
 const pastaAuth = path.join("/data", "auth_info_baileys");
 let dadosCache = null;
 const conversas = {};
-let lastQrCode = null; 
+let lastQrCode = null;
+
+function podeResgatar(funcionarioGrupo, recompensaGrupo, recompensaValor) {
+  const grupoIndex = GRUPO_ORDEM.indexOf(funcionarioGrupo);
+  const recompensaIndex = GRUPO_ORDEM.indexOf(recompensaGrupo);
+
+  if (funcionarioGrupo === "D") return false;
+  if (funcionarioGrupo === "AA") {
+    return [50, 100, 150, 200].includes(recompensaValor);
+  }
+  if (funcionarioGrupo === "A") {
+    return [50, 100].includes(recompensaValor) && recompensaIndex >= grupoIndex;
+  }
+  if (funcionarioGrupo === "B") {
+    return recompensaValor === 50 && recompensaIndex >= grupoIndex;
+  }
+  if (funcionarioGrupo === "C") {
+    return [15, 30].includes(recompensaValor) && recompensaGrupo === "C";
+  }
+  return false;
+}
+
+async function corrigirCabecalho(sheet, colunaFaltando) {
+  if (!sheet.headerValues.includes(colunaFaltando)) {
+    sheet.headerValues.push(colunaFaltando);
+    await sheet.setHeaderRow(sheet.headerValues);
+  }
+}
 
 async function carregarDadosDoSheets() {
   try {
@@ -44,20 +74,40 @@ async function carregarDadosDoSheets() {
           "CPF",
           "Nome",
           "NOME",
-          "Pontos Totais",
-          "PONTOS_TOTAIS",
           "Saldo",
           "SALDO",
+          "Pontos Totais",
+          "PONTOS_TOTAIS",
+          "Grupo",
         ],
       });
+    } else {
+      await corrigirCabecalho(sheetFuncionarios, "Grupo");
+      const header = sheetFuncionarios.headerValues;
+      const iSaldo = header.indexOf("Saldo");
+      const iPontos = header.indexOf("Pontos Totais");
+      if (iSaldo !== -1 && iPontos !== -1 && iPontos < iSaldo) {
+        header.splice(iPontos, 1);
+        header.splice(iSaldo + 1, 0, "Pontos Totais");
+        await sheetFuncionarios.setHeaderRow(header);
+      }
+      const iSALDO = header.indexOf("SALDO");
+      const iPONTOS = header.indexOf("PONTOS_TOTAIS");
+      if (iSALDO !== -1 && iPONTOS !== -1 && iPONTOS < iSALDO) {
+        header.splice(iPONTOS, 1);
+        header.splice(iSALDO + 1, 0, "PONTOS_TOTAIS");
+        await sheetFuncionarios.setHeaderRow(header);
+      }
     }
 
     let sheetRecompensas = doc.sheetsByTitle["Recompensas"];
     if (!sheetRecompensas) {
       sheetRecompensas = await doc.addSheet({
         title: "Recompensas",
-        headerValues: ["ID", "Nome", "NOME", "Valor", "VALOR"],
+        headerValues: ["ID", "Nome", "NOME", "Valor", "VALOR", "Grupo"],
       });
+    } else {
+      await corrigirCabecalho(sheetRecompensas, "Grupo");
     }
 
     let sheetHistorico = doc.sheetsByTitle["Historico"];
@@ -83,12 +133,19 @@ async function carregarDadosDoSheets() {
     for (const row of rowsFunc) {
       const cpf = sanitizarCPF(row.get("ID") || row.get("CPF"));
       if (cpf) {
+        let grupoRaw = row.get("Grupo");
+        let grupo = tratarGrupo(grupoRaw, "funcionario");
+        if (grupoRaw !== grupo) {
+          row.set("Grupo", grupo);
+          await row.save();
+        }
         funcionarios[cpf] = {
           nome: sanitizarNome(row.get("Nome") || row.get("NOME") || ""),
           pontosTotais: inteiroSeguro(
             row.get("Pontos Totais") || row.get("PONTOS_TOTAIS") || "0"
           ),
           saldo: inteiroSeguro(row.get("Saldo") || row.get("SALDO") || "0"),
+          grupo,
           rowIndex: row.rowNumber,
         };
       }
@@ -100,9 +157,16 @@ async function carregarDadosDoSheets() {
     for (const row of rowsRec) {
       const id = row.get("ID");
       if (id) {
+        let grupoRaw = row.get("Grupo");
+        let grupo = tratarGrupo(grupoRaw, "recompensa");
+        if (grupoRaw !== grupo) {
+          row.set("Grupo", grupo);
+          await row.save();
+        }
         recompensas[id] = {
           nome: sanitizarNome(row.get("Nome") || row.get("NOME") || ""),
           valor: inteiroSeguro(row.get("Valor") || row.get("VALOR") || "0"),
+          grupo,
         };
       }
     }
@@ -123,12 +187,19 @@ async function buscarFuncionarioDoSheets(cpfFuncionario) {
   for (const row of rows) {
     const cpf = sanitizarCPF(row.get("ID") || row.get("CPF"));
     if (cpf === cpfFuncionario) {
+      let grupoRaw = row.get("Grupo");
+      let grupo = tratarGrupo(grupoRaw, "funcionario");
+      if (grupoRaw !== grupo) {
+        row.set("Grupo", grupo);
+        await row.save();
+      }
       return {
         nome: sanitizarNome(row.get("Nome") || row.get("NOME") || ""),
         pontosTotais: inteiroSeguro(
           row.get("Pontos Totais") || row.get("PONTOS_TOTAIS") || "0"
         ),
         saldo: inteiroSeguro(row.get("Saldo") || row.get("SALDO") || "0"),
+        grupo,
         rowIndex: row.rowNumber,
         rowObj: row,
       };
@@ -205,13 +276,15 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
     const nome = sanitizarNome(funcionario.nome);
     const pontosTotais = funcionario.pontosTotais;
     const saldo = funcionario.saldo;
+    const grupo = funcionario.grupo;
 
-    let resposta = `✅ Olá, ${nome}!\n\n📊 Pontos Totais: ${pontosTotais}\n💰 Saldo Disponível: ${saldo}\n\n🎁 RECOMPENSAS DISPONÍVEIS:\n\n`;
+    let resposta = `✅ Olá, ${nome}!\n\n💰 Saldo Disponível: ${saldo}\n📊 Pontos Totais: ${pontosTotais}\n🔰 Grupo: ${grupo}\n\n🎁 RECOMPENSAS DISPONÍVEIS:\n\n`;
 
     let temRecompensa = false;
     for (const [codigo, recompensa] of Object.entries(recompensas)) {
       const nomeRec = sanitizarNome(recompensa.nome);
-      if (saldo >= recompensa.valor) {
+      const pode = podeResgatar(grupo, recompensa.grupo, recompensa.valor);
+      if (saldo >= recompensa.valor && pode) {
         resposta += `${codigo} - ${nomeRec} (${recompensa.valor}) ✅\n`;
         temRecompensa = true;
       } else {
@@ -221,7 +294,7 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
 
     if (!temRecompensa) {
       delete conversas[numeroWhatsApp];
-      return resposta + "\n⚠️ Saldo insuficiente.";
+      return resposta + "\n⚠️ Saldo insuficiente ou grupo sem permissão.";
     }
 
     return resposta + "\n📝 Digite o número da recompensa ou *0* para sair.";
@@ -244,52 +317,60 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
 
     const cpf = conversas[numeroWhatsApp].cpf;
     const recompensaEscolhida = recompensas[escolha];
+    const funcionarioAtual = await buscarFuncionarioDoSheets(cpf);
 
-    try {
-      const funcionarioAtual = await buscarFuncionarioDoSheets(cpf);
-      if (!funcionarioAtual) {
-        return "❌ Funcionário não encontrado.";
-      }
-      if (funcionarioAtual.saldo < recompensaEscolhida.valor) {
-        return `❌ Saldo insuficiente para ${sanitizarNome(
-          recompensaEscolhida.nome
-        )}.`;
-      }
+    if (!funcionarioAtual) return "❌ Funcionário não encontrado.";
 
-      const novoSaldo = funcionarioAtual.saldo - recompensaEscolhida.valor;
-      try {
-        funcionarioAtual.rowObj.set("Saldo", novoSaldo);
-        await funcionarioAtual.rowObj.save();
-      } catch (erroSaldo) {
-        console.error("Erro ao atualizar saldo no Sheets:", erroSaldo);
-        return "❌ Erro ao atualizar o saldo, tente novamente.";
-      }
-
-      dadosCache.funcionarios[cpf].saldo = novoSaldo;
-
-      const agora = new Date();
-      const numeroPedido = `PED${agora.getFullYear()}${String(
-        agora.getMonth() + 1
-      ).padStart(2, "0")}${String(agora.getDate()).padStart(2, "0")}${String(
-        agora.getHours()
-      ).padStart(2, "0")}${String(agora.getMinutes()).padStart(2, "0")}${String(
-        agora.getSeconds()
-      ).padStart(2, "0")}`;
-
-      await salvarResgate(cpf, recompensaEscolhida, numeroPedido);
-      const nota = gerarNotaPedido(
-        sanitizarNome(funcionarioAtual.nome),
-        cpf,
-        recompensaEscolhida,
-        numeroPedido,
-        novoSaldo
-      );
-      delete conversas[numeroWhatsApp];
-      return nota;
-    } catch (err) {
-      console.error("Erro ao processar resgate:", err);
-      return "❌ Erro ao processar resgate.";
+    if (
+      !podeResgatar(
+        funcionarioAtual.grupo,
+        recompensaEscolhida.grupo,
+        recompensaEscolhida.valor
+      )
+    ) {
+      return `❌ Sua categoria de grupo (${
+        funcionarioAtual.grupo
+      }) não pode resgatar essa recompensa (${sanitizarNome(
+        recompensaEscolhida.nome
+      )}, R$${recompensaEscolhida.valor}, grupo ${recompensaEscolhida.grupo}).`;
     }
+
+    if (funcionarioAtual.saldo < recompensaEscolhida.valor) {
+      return `❌ Saldo insuficiente para ${sanitizarNome(
+        recompensaEscolhida.nome
+      )}.`;
+    }
+
+    const novoSaldo = funcionarioAtual.saldo - recompensaEscolhida.valor;
+    try {
+      funcionarioAtual.rowObj.set("Saldo", novoSaldo);
+      await funcionarioAtual.rowObj.save();
+    } catch (erroSaldo) {
+      console.error("Erro ao atualizar saldo no Sheets:", erroSaldo);
+      return "❌ Erro ao atualizar o saldo, tente novamente.";
+    }
+
+    dadosCache.funcionarios[cpf].saldo = novoSaldo;
+
+    const agora = new Date();
+    const numeroPedido = `PED${agora.getFullYear()}${String(
+      agora.getMonth() + 1
+    ).padStart(2, "0")}${String(agora.getDate()).padStart(2, "0")}${String(
+      agora.getHours()
+    ).padStart(2, "0")}${String(agora.getMinutes()).padStart(2, "0")}${String(
+      agora.getSeconds()
+    ).padStart(2, "0")}`;
+
+    await salvarResgate(cpf, recompensaEscolhida, numeroPedido);
+    const nota = gerarNotaPedido(
+      sanitizarNome(funcionarioAtual.nome),
+      cpf,
+      recompensaEscolhida,
+      numeroPedido,
+      novoSaldo
+    );
+    delete conversas[numeroWhatsApp];
+    return nota;
   }
 }
 
@@ -315,7 +396,6 @@ function gerarNotaPedido(nome, cpf, recompensa, numeroPedido, saldoRestante) {
               `.trim();
 }
 
-// --- WhatsApp + QR code ---
 async function conectarWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState(pastaAuth);
   const sock = makeWASocket({ auth: state });
@@ -323,7 +403,6 @@ async function conectarWhatsApp() {
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
     if (qr) {
-      // Gera imagem base64 para web
       lastQrCode = await qrcode.toDataURL(qr);
       console.log("QR code gerado! Acesse /qr para visualizar.");
     }
@@ -366,7 +445,6 @@ async function conectarWhatsApp() {
   });
 }
 
-// --- Express ---
 const app = express();
 app.use(express.json());
 const PORT = process.env.PORT || 3000;
@@ -374,7 +452,6 @@ app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
 });
 
-// Rota QR code
 app.get("/qr", (req, res) => {
   if (!lastQrCode) {
     return res.send(
@@ -431,5 +508,4 @@ setInterval(async () => {
   }
 }, 5 * 60 * 1000);
 
-// Exporta função para testes
 module.exports = { processarMensagem };

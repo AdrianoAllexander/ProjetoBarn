@@ -6,7 +6,7 @@ const {
   DisconnectReason,
   useMultiFileAuthState,
 } = require("@whiskeysockets/baileys");
-const qrcode = require("qrcode-terminal");
+const qrcode = require("qrcode");
 const express = require("express");
 const { GoogleSpreadsheet } = require("google-spreadsheet");
 const { JWT } = require("google-auth-library");
@@ -20,6 +20,7 @@ const {
 const pastaAuth = path.join("/data", "auth_info_baileys");
 let dadosCache = null;
 const conversas = {};
+let lastQrCode = null; 
 
 async function carregarDadosDoSheets() {
   try {
@@ -314,13 +315,18 @@ function gerarNotaPedido(nome, cpf, recompensa, numeroPedido, saldoRestante) {
               `.trim();
 }
 
+// --- WhatsApp + QR code ---
 async function conectarWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState(pastaAuth);
   const sock = makeWASocket({ auth: state });
 
-  sock.ev.on("connection.update", (update) => {
+  sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
-    if (qr) qrcode.generate(qr, { small: true });
+    if (qr) {
+      // Gera imagem base64 para web
+      lastQrCode = await qrcode.toDataURL(qr);
+      console.log("QR code gerado! Acesse /qr para visualizar.");
+    }
     if (connection === "close") {
       const shouldReconnect =
         lastDisconnect?.error?.output?.statusCode !==
@@ -360,11 +366,29 @@ async function conectarWhatsApp() {
   });
 }
 
+// --- Express ---
 const app = express();
 app.use(express.json());
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
+});
+
+// Rota QR code
+app.get("/qr", (req, res) => {
+  if (!lastQrCode) {
+    return res.send(
+      "<h2>QR code não gerado ainda. Aguarde a inicialização do bot!</h2>"
+    );
+  }
+  res.send(`
+    <html>
+      <body>
+        <h2>Escaneie o QR code abaixo com o WhatsApp!</h2>
+        <img src="${lastQrCode}" />
+      </body>
+    </html>
+  `);
 });
 
 app.get("/", (req, res) => {
@@ -406,3 +430,6 @@ setInterval(async () => {
     console.error("Erro no reload automático:", err);
   }
 }, 5 * 60 * 1000);
+
+// Exporta função para testes
+module.exports = { processarMensagem };

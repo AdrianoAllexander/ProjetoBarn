@@ -46,6 +46,7 @@ function podeResgatar(funcionarioGrupo, recompensaGrupo, recompensaValor) {
 }
 
 async function corrigirCabecalho(sheet, colunaFaltando) {
+  await sheet.loadHeaderRow();
   if (!sheet.headerValues.includes(colunaFaltando)) {
     sheet.headerValues.push(colunaFaltando);
     await sheet.setHeaderRow(sheet.headerValues);
@@ -69,19 +70,10 @@ async function carregarDadosDoSheets() {
     if (!sheetFuncionarios) {
       sheetFuncionarios = await doc.addSheet({
         title: "Funcionarios",
-        headerValues: [
-          "ID",
-          "CPF",
-          "Nome",
-          "NOME",
-          "Saldo",
-          "SALDO",
-          "Pontos Totais",
-          "PONTOS_TOTAIS",
-          "Grupo",
-        ],
+        headerValues: ["ID", "CPF", "Nome", "Saldo", "Pontos Totais", "Grupo"],
       });
     } else {
+      await sheetFuncionarios.loadHeaderRow();
       await corrigirCabecalho(sheetFuncionarios, "Grupo");
       const header = sheetFuncionarios.headerValues;
       const iSaldo = header.indexOf("Saldo");
@@ -91,22 +83,16 @@ async function carregarDadosDoSheets() {
         header.splice(iSaldo + 1, 0, "Pontos Totais");
         await sheetFuncionarios.setHeaderRow(header);
       }
-      const iSALDO = header.indexOf("SALDO");
-      const iPONTOS = header.indexOf("PONTOS_TOTAIS");
-      if (iSALDO !== -1 && iPONTOS !== -1 && iPONTOS < iSALDO) {
-        header.splice(iPONTOS, 1);
-        header.splice(iSALDO + 1, 0, "PONTOS_TOTAIS");
-        await sheetFuncionarios.setHeaderRow(header);
-      }
     }
 
     let sheetRecompensas = doc.sheetsByTitle["Recompensas"];
     if (!sheetRecompensas) {
       sheetRecompensas = await doc.addSheet({
         title: "Recompensas",
-        headerValues: ["ID", "Nome", "NOME", "Valor", "VALOR", "Grupo"],
+        headerValues: ["ID", "Nome", "Valor", "Grupo"],
       });
     } else {
+      await sheetRecompensas.loadHeaderRow();
       await corrigirCabecalho(sheetRecompensas, "Grupo");
     }
 
@@ -125,6 +111,8 @@ async function carregarDadosDoSheets() {
           "Saldo_Atual",
         ],
       });
+    } else {
+      await sheetHistorico.loadHeaderRow();
     }
 
     const rowsFunc = await sheetFuncionarios.getRows();
@@ -140,11 +128,9 @@ async function carregarDadosDoSheets() {
           await row.save();
         }
         funcionarios[cpf] = {
-          nome: sanitizarNome(row.get("Nome") || row.get("NOME") || ""),
-          pontosTotais: inteiroSeguro(
-            row.get("Pontos Totais") || row.get("PONTOS_TOTAIS") || "0"
-          ),
-          saldo: inteiroSeguro(row.get("Saldo") || row.get("SALDO") || "0"),
+          nome: sanitizarNome(row.get("Nome") || ""),
+          pontosTotais: inteiroSeguro(row.get("Pontos Totais") || "0"),
+          saldo: inteiroSeguro(row.get("Saldo") || "0"),
           grupo,
           rowIndex: row.rowNumber,
         };
@@ -164,8 +150,8 @@ async function carregarDadosDoSheets() {
           await row.save();
         }
         recompensas[id] = {
-          nome: sanitizarNome(row.get("Nome") || row.get("NOME") || ""),
-          valor: inteiroSeguro(row.get("Valor") || row.get("VALOR") || "0"),
+          nome: sanitizarNome(row.get("Nome") || ""),
+          valor: inteiroSeguro(row.get("Valor") || "0"),
           grupo,
         };
       }
@@ -182,6 +168,7 @@ async function buscarFuncionarioDoSheets(cpfFuncionario) {
   if (!dadosCache || !dadosCache.doc)
     throw new Error("Documento do Google Sheets não disponível");
   const sheetFuncionarios = dadosCache.doc.sheetsByTitle["Funcionarios"];
+  await sheetFuncionarios.loadHeaderRow();
   const rows = await sheetFuncionarios.getRows();
 
   for (const row of rows) {
@@ -194,11 +181,9 @@ async function buscarFuncionarioDoSheets(cpfFuncionario) {
         await row.save();
       }
       return {
-        nome: sanitizarNome(row.get("Nome") || row.get("NOME") || ""),
-        pontosTotais: inteiroSeguro(
-          row.get("Pontos Totais") || row.get("PONTOS_TOTAIS") || "0"
-        ),
-        saldo: inteiroSeguro(row.get("Saldo") || row.get("SALDO") || "0"),
+        nome: sanitizarNome(row.get("Nome") || ""),
+        pontosTotais: inteiroSeguro(row.get("Pontos Totais") || "0"),
+        saldo: inteiroSeguro(row.get("Saldo") || "0"),
         grupo,
         rowIndex: row.rowNumber,
         rowObj: row,
@@ -212,21 +197,7 @@ async function salvarResgate(cpfFuncionario, recompensa, numeroPedido) {
   try {
     if (!dadosCache.doc) return;
     let sheetHistorico = dadosCache.doc.sheetsByTitle["Historico"];
-    if (!sheetHistorico) {
-      sheetHistorico = await dadosCache.doc.addSheet({
-        title: "Historico",
-        headerValues: [
-          "Data",
-          "CPF",
-          "Nome",
-          "Recompensa",
-          "Valor",
-          "Pedido",
-          "Saldo_Anterior",
-          "Saldo_Atual",
-        ],
-      });
-    }
+    await sheetHistorico.loadHeaderRow();
 
     const agora = new Date();
     const funcionario = await buscarFuncionarioDoSheets(cpfFuncionario);

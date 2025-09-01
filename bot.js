@@ -136,6 +136,7 @@ async function carregarDadosDoSheets() {
           saldo: inteiroSeguro(row.get("Saldo") || "0"),
           grupo,
           rowIndex: row.rowNumber,
+          rowObj: row,
         };
       }
     }
@@ -276,7 +277,10 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
       return resposta + "\n⚠️ Saldo insuficiente ou grupo sem permissão.";
     }
 
-    return resposta + "\n📝 Digite o número da recompensa ou *0* para sair.";
+    resposta += "\n📝 Digite o número da recompensa para resgatar.";
+    resposta += "\n🔙 Para voltar ou sair, digite '0', 'voltar' ou 'sair'.";
+
+    return resposta;
   }
 
   if (etapaAtual === "mostrando_pontos") {
@@ -287,11 +291,11 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
       escolha.toLowerCase() === "sair"
     ) {
       delete conversas[numeroWhatsApp];
-      return "Conversa encerrada.";
+      return "Conversa encerrada. Você pode iniciar novamente digitando seu email.";
     }
 
     if (!recompensas[escolha]) {
-      return "❌ Opção inválida.";
+      return "❌ Opção inválida. Digite o número da recompensa, ou '0', 'voltar' ou 'sair' para encerrar.";
     }
 
     const id = conversas[numeroWhatsApp].id;
@@ -468,7 +472,10 @@ app.get("/reload", async (req, res) => {
 });
 
 carregarDadosDoSheets()
-  .then(() => conectarWhatsApp())
+  .then((dados) => {
+    dadosCache = dados;
+    conectarWhatsApp();
+  })
   .catch((err) => {
     console.error("Erro de inicialização:", err);
     process.exit(1);
@@ -488,6 +495,6 @@ setInterval(async () => {
   } catch (err) {
     console.error("Erro no reload automático:", err);
   }
-}, 5 * 60 * 1000);
+}, 1 * 60 * 1000);
 
 module.exports = { processarMensagem };

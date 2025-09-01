@@ -13,7 +13,7 @@ const { JWT } = require("google-auth-library");
 const {
   inteiroSeguro,
   numeroSeguroBR,
-  sanitizarCPF,
+  sanitizarEmail,
   sanitizarNome,
   grupoValido,
   tratarGrupo,
@@ -24,6 +24,7 @@ const pastaAuth = path.join("/data", "auth_info_baileys");
 let dadosCache = null;
 const conversas = {};
 let lastQrCode = null;
+let botAtivo = false;
 
 function podeResgatar(funcionarioGrupo, recompensaGrupo, recompensaValor) {
   const grupoIndex = GRUPO_ORDEM.indexOf(funcionarioGrupo);
@@ -70,7 +71,7 @@ async function carregarDadosDoSheets() {
     if (!sheetFuncionarios) {
       sheetFuncionarios = await doc.addSheet({
         title: "Funcionarios",
-        headerValues: ["ID", "CPF", "Nome", "Saldo", "Pontos Totais", "Grupo"],
+        headerValues: ["ID", "Nome", "Saldo", "Pontos Totais", "Grupo"],
       });
     } else {
       await sheetFuncionarios.loadHeaderRow();
@@ -102,32 +103,34 @@ async function carregarDadosDoSheets() {
         title: "Historico",
         headerValues: [
           "Data",
-          "CPF",
+          "ID",
           "Nome",
           "Recompensa",
           "Valor",
           "Pedido",
           "Saldo_Anterior",
           "Saldo_Atual",
+          "Telefone",
         ],
       });
     } else {
       await sheetHistorico.loadHeaderRow();
+      await corrigirCabecalho(sheetHistorico, "Telefone");
     }
 
     const rowsFunc = await sheetFuncionarios.getRows();
     const funcionarios = {};
 
     for (const row of rowsFunc) {
-      const cpf = sanitizarCPF(row.get("ID") || row.get("CPF"));
-      if (cpf) {
+      const id = sanitizarEmail(row.get("ID"));
+      if (id) {
         let grupoRaw = row.get("Grupo");
         let grupo = tratarGrupo(grupoRaw, "funcionario");
         if (grupoRaw !== grupo) {
           row.set("Grupo", grupo);
           await row.save();
         }
-        funcionarios[cpf] = {
+        funcionarios[id] = {
           nome: sanitizarNome(row.get("Nome") || ""),
           pontosTotais: inteiroSeguro(row.get("Pontos Totais") || "0"),
           saldo: inteiroSeguro(row.get("Saldo") || "0"),
@@ -164,7 +167,7 @@ async function carregarDadosDoSheets() {
   }
 }
 
-async function buscarFuncionarioDoSheets(cpfFuncionario) {
+async function buscarFuncionarioDoSheets(idFuncionario) {
   if (!dadosCache || !dadosCache.doc)
     throw new Error("Documento do Google Sheets não disponível");
   const sheetFuncionarios = dadosCache.doc.sheetsByTitle["Funcionarios"];
@@ -172,8 +175,8 @@ async function buscarFuncionarioDoSheets(cpfFuncionario) {
   const rows = await sheetFuncionarios.getRows();
 
   for (const row of rows) {
-    const cpf = sanitizarCPF(row.get("ID") || row.get("CPF"));
-    if (cpf === cpfFuncionario) {
+    const id = sanitizarEmail(row.get("ID"));
+    if (id === idFuncionario) {
       let grupoRaw = row.get("Grupo");
       let grupo = tratarGrupo(grupoRaw, "funcionario");
       if (grupoRaw !== grupo) {
@@ -193,24 +196,30 @@ async function buscarFuncionarioDoSheets(cpfFuncionario) {
   return null;
 }
 
-async function salvarResgate(cpfFuncionario, recompensa, numeroPedido) {
+async function salvarResgate(
+  idFuncionario,
+  recompensa,
+  numeroPedido,
+  telefone
+) {
   try {
     if (!dadosCache.doc) return;
     let sheetHistorico = dadosCache.doc.sheetsByTitle["Historico"];
     await sheetHistorico.loadHeaderRow();
 
     const agora = new Date();
-    const funcionario = await buscarFuncionarioDoSheets(cpfFuncionario);
+    const funcionario = await buscarFuncionarioDoSheets(idFuncionario);
 
     await sheetHistorico.addRow({
       Data: agora.toLocaleString("pt-BR"),
-      CPF: cpfFuncionario,
+      ID: idFuncionario,
       Nome: sanitizarNome(funcionario.nome),
       Recompensa: sanitizarNome(recompensa.nome),
       Valor: recompensa.valor,
       Pedido: numeroPedido,
       Saldo_Anterior: funcionario.saldo + recompensa.valor,
       Saldo_Atual: funcionario.saldo,
+      Telefone: telefone,
     });
   } catch (error) {
     console.error("Erro ao salvar resgate:", error);
@@ -230,26 +239,25 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
   const recompensas = dadosCache.recompensas;
 
   if (!conversas[numeroWhatsApp]) {
-    conversas[numeroWhatsApp] = { etapa: "pedindo_cpf" };
-    return "🤖 Olá! Digite seu CPF:";
+    conversas[numeroWhatsApp] = { etapa: "pedindo_id" };
+    return "🤖 Olá! Digite seu email:";
   }
 
   const etapaAtual = conversas[numeroWhatsApp].etapa;
 
-  if (etapaAtual === "pedindo_cpf") {
-    const cpf = sanitizarCPF(mensagem.trim());
-    if (!funcionarios[cpf]) return `❌ CPF não encontrado.`;
+  if (etapaAtual === "pedindo_id") {
+    const id = sanitizarEmail(mensagem.trim());
+    if (!funcionarios[id]) return `❌ Email não encontrado.`;
 
-    conversas[numeroWhatsApp].cpf = cpf;
+    conversas[numeroWhatsApp].id = id;
     conversas[numeroWhatsApp].etapa = "mostrando_pontos";
 
-    const funcionario = funcionarios[cpf];
+    const funcionario = funcionarios[id];
     const nome = sanitizarNome(funcionario.nome);
-    const pontosTotais = funcionario.pontosTotais;
     const saldo = funcionario.saldo;
     const grupo = funcionario.grupo;
 
-    let resposta = `✅ Olá, ${nome}!\n\n💰 Saldo Disponível: ${saldo}\n📊 Pontos Totais: ${pontosTotais}\n🔰 Grupo: ${grupo}\n\n🎁 RECOMPENSAS DISPONÍVEIS:\n\n`;
+    let resposta = `✅ Olá, ${nome}!\n\n💰 Saldo Disponível: ${saldo}\n🔰 Grupo: ${grupo}\n\n🎁 RECOMPENSAS DISPONÍVEIS:\n\n`;
 
     let temRecompensa = false;
     for (const [codigo, recompensa] of Object.entries(recompensas)) {
@@ -286,9 +294,9 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
       return "❌ Opção inválida.";
     }
 
-    const cpf = conversas[numeroWhatsApp].cpf;
+    const id = conversas[numeroWhatsApp].id;
     const recompensaEscolhida = recompensas[escolha];
-    const funcionarioAtual = await buscarFuncionarioDoSheets(cpf);
+    const funcionarioAtual = await buscarFuncionarioDoSheets(id);
 
     if (!funcionarioAtual) return "❌ Funcionário não encontrado.";
 
@@ -321,7 +329,7 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
       return "❌ Erro ao atualizar o saldo, tente novamente.";
     }
 
-    dadosCache.funcionarios[cpf].saldo = novoSaldo;
+    dadosCache.funcionarios[id].saldo = novoSaldo;
 
     const agora = new Date();
     const numeroPedido = `PED${agora.getFullYear()}${String(
@@ -332,10 +340,10 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
       agora.getSeconds()
     ).padStart(2, "0")}`;
 
-    await salvarResgate(cpf, recompensaEscolhida, numeroPedido);
+    await salvarResgate(id, recompensaEscolhida, numeroPedido, numeroWhatsApp);
     const nota = gerarNotaPedido(
       sanitizarNome(funcionarioAtual.nome),
-      cpf,
+      id,
       recompensaEscolhida,
       numeroPedido,
       novoSaldo
@@ -345,7 +353,7 @@ async function processarMensagem(numeroWhatsApp, mensagem) {
   }
 }
 
-function gerarNotaPedido(nome, cpf, recompensa, numeroPedido, saldoRestante) {
+function gerarNotaPedido(nome, id, recompensa, numeroPedido, saldoRestante) {
   const agora = new Date();
   const dataHora = agora.toLocaleString("pt-BR");
 
@@ -356,10 +364,9 @@ function gerarNotaPedido(nome, cpf, recompensa, numeroPedido, saldoRestante) {
               📅 Data: ${dataHora}
               
               👤 Funcionário: ${sanitizarNome(nome)}
-              🆔 CPF: ${cpf}
+              📧 Email: ${id}
               
               🎁 Recompensa: ${sanitizarNome(recompensa.nome)}
-              🎯 Pontos utilizados: ${recompensa.valor}
               💰 Saldo restante: ${saldoRestante}
               
               ✅ Resgate aprovado!
@@ -377,7 +384,11 @@ async function conectarWhatsApp() {
       lastQrCode = await qrcode.toDataURL(qr);
       console.log("QR code gerado! Acesse /qr para visualizar.");
     }
+    if (connection === "open") {
+      botAtivo = true;
+    }
     if (connection === "close") {
+      botAtivo = false;
       const shouldReconnect =
         lastDisconnect?.error?.output?.statusCode !==
         DisconnectReason.loggedOut;
@@ -441,7 +452,7 @@ app.get("/qr", (req, res) => {
 
 app.get("/", (req, res) => {
   res.json({
-    status: "Ativo",
+    status: botAtivo ? "Ativo" : "Inativo",
     funcionarios: dadosCache ? Object.keys(dadosCache.funcionarios).length : 0,
     recompensas: dadosCache ? Object.keys(dadosCache.recompensas).length : 0,
   });

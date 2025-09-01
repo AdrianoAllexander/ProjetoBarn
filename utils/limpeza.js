@@ -17,8 +17,12 @@ function numeroSeguroBR(valor) {
   return isNaN(convertido) ? 0 : convertido;
 }
 
-function sanitizarCPF(valor) {
-  return (valor || "").replace(/\D/g, "");
+function sanitizarEmail(valor) {
+  if (!valor) return "";
+  return String(valor)
+    .toLowerCase()
+    .replace(/[\r\n\t ]/g, "")
+    .replace(/[^\w.@-]/g, "");
 }
 
 function sanitizarNome(valor, tamanhoMax = 60) {
@@ -45,7 +49,7 @@ function tratarGrupo(valor, tipo = "funcionario") {
 module.exports = {
   inteiroSeguro,
   numeroSeguroBR,
-  sanitizarCPF,
+  sanitizarEmail,
   sanitizarNome,
   grupoValido,
   tratarGrupo,
